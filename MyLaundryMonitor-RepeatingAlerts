@@ -1,0 +1,201 @@
+/**
+ *  Alert on Power Consumption
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
+ *  in compliance with the License. You may obtain a copy of the License at:
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
+ *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
+ *  for the specific language governing permissions and limitations under the License.
+ *
+ */
+
+import groovy.time.*
+
+definition(
+  name: "Laundry Monitor-Repeating Alerts",
+  namespace: "tweas",
+  author: "Tray Eason",
+  description: "Using a power meterto monitor the laundry cycle and alert when it's done. Also turns on switches (or lights with switch capability)",
+  category: "Convenience",
+  iconUrl: "https://s3.amazonaws.com/smartthings-device-icons/Appliances/appliances8-icn.png",
+  iconX2Url: "https://s3.amazonaws.com/smartthings-device-icons/Appliances/appliances8-icn@2x.png")
+
+
+preferences {
+    
+  section ("Turn Off These Switches At Start.") {
+    input "switchesStart", "capability.switch", title: "Turn off these switch at start", required: false, multiple:true
+  }
+  section ("When this device stops drawing power (Washer or Dryer Meter Settings)") {
+    input "meter", "capability.powerMeter", multiple: false, required: true
+    input "cycle_start_power_threshold", "number", title: "Start cycle when power consumption goes above (W)", required: true
+    input "cycle_end_power_threshold", "number", title: "Stop cycle when power consumption drops below (W) ...", required: true
+    input "cycle_end_wait", "number", title: "... for at least this long (min)", required: true
+  }
+  
+  section ("Send This Message") {
+    input "message", "text", title: "Notification message", description: "Laudry is done!", required: False
+  }
+  
+  section ("Using These Notification Methods") {
+    input "sendPushMessage", "bool", title: "Send a device notification?", defaultValue: false
+    input "notificationDevices", "capability.notification", title: "Notification device", required: false, multiple: true
+    input "speechOut", "capability.speechSynthesis", title:"Speak Via: (Speech Synthesis)",multiple: true, required: false
+    input "player", "capability.musicPlayer", title:"Speak Via: (Music Player -> TTS)",multiple: true, required: false
+  }
+    section ("For Repeating Messages, turn on this switch (MUST BE TURNED OFF MANUALLY IF NOT TURNED OFF AT BEGINNING OF THIS PROGRAM)") {
+    input "switchEnd", "capability.switch", title: "Turn on this switch when done(Primary - WILL REPEAT ALERTS IF THIS SWITCH IS SELECTED)", required: false, multiple:false
+  }
+  section ("How Often To Be Reminded (CHOICES ARE 1, 5, 10, 15, 30, 60, or 180 - ANYTHING ELSE WILL ERROR)") {
+     input "repeatTimer", "number", title: "Repeat every (min)", required: false
+   }
+   section ("Turn On These Additional Switches (Can be lights)") {
+     input "additionalSwitches", "capability.switch", title: "Additional Switches to be turned on at end of cycle", required: false, multiple:true
+  }
+}
+
+def installed() {
+  log.debug "Installed with settings: ${settings}"
+  init()
+}
+
+def updated() {
+  log.debug "Updated with settings: ${settings}"
+  unsubscribe()
+  unschedule()
+  init()
+}
+
+def init() {
+  subscribe(meter, "power", handler)
+  //subscribe(switchEnd, "switch",repeatMessages)
+}
+
+def handler(evt) {
+    def latestPower = meter.currentValue("power")
+    log.trace "Power: ${latestPower}W"
+
+    if (!state.cycleOn && latestPower > cycle_start_power_threshold) {
+        cycleOn(evt)
+    }
+    // If power drops below threshold, wait for a few minutes.
+    else if (state.cycleOn && latestPower <= cycle_end_power_threshold) {
+        runIn(cycle_end_wait * 60, "cycleOff")
+    }
+}
+
+private repeatMessages(evt) {
+    def swValue = switchEnd.currentValue("switch")
+    log.debug "Starting Repeat Messages every ${repeatTimer} Minutes - Swvalue is ${swValue} inside"
+    
+    if (swValue == "on"){    
+        log.trace "Repeating Messages - Swvalue is ${swValue}"
+        sendMessages()
+    }
+    else if (swValue == "off"){
+        unsubscribe(switchEnd)
+        unschedule()
+        log.trace "Repeating Messages ended"
+    }
+    else {
+        state.rptMsgOn = false
+        unsubscribe(switchEnd)
+        unschedule()
+        log.trace "Repeating Messages error - switch status not valid"
+    }
+}
+
+
+private cycleOn(evt) {
+    state.cycleOn = true
+    if (switchesStart) {
+          switchesStart*.off()
+        }
+    log.trace "Cycle started. Cycle state: On"
+}
+
+private cycleOff(evt) {
+    def latestPower = meter.currentValue("power")
+    log.trace "Power: ${latestPower}W"
+
+    // If power is still below threshold, end cycle.
+    if (state.cycleOn && latestPower <= cycle_end_power_threshold) {
+        state.cycleOn = false
+        log.trace "Cycle ended"
+        
+        if (additionalSwitches) {
+          additionalSwitches*.on()
+        }
+        
+        if (switchEnd) {
+          switchEnd*.on()
+          sendMessages()
+          switch(repeatTimer){
+             case 1:
+               runEvery1Minute("repeatMessages")
+               break
+             case 5:
+               runEvery5Minutes("repeatMessages")
+               break
+             case 10:
+               runEvery10Minutes("repeatMessages")
+               break
+             case 15:
+               runEvery15Minutes("repeatMessages")
+               break
+             case 30:
+               runEvery30Minutes("repeatMessages")
+               break
+             case 60:
+               runEvery1Hour("repeatMessages")
+               break
+             case 180:
+               runEvery3Hours("repeatMessages")
+               break
+             default:
+               log.debug "Invalid Timer Entry"
+               unschedule()
+               break
+	  }
+        }
+        else{
+          log.debug "Repeat Message flag is false"
+          sendMessages()
+        }
+    }
+}
+
+private sendMessages(evt) {
+        log.trace "Sending Messages"
+    
+        if(speechOut){
+            speakMessage(message)}
+        
+        if(player){
+            musicPlayerTTS(message)
+        } 
+        
+        if (sendPushMessage) {
+            send(message)
+        }
+    
+}
+
+private send(msg) {
+    notificationDevices.each{ device -> 
+    device.deviceNotification(msg)
+}
+
+  log.debug msg
+}
+
+private speakMessage(msg) {
+     speechOut.speak(msg)
+}
+
+private musicPlayerTTS(msg) {
+	player.playText(msg)
+}
